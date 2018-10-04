@@ -41,22 +41,6 @@ object Main extends App {
     override def toString: String = s"Missing HTTP header: $headerName"
   }
 
-  implicit class EitherOps[B](either: Either[Throwable, B]) {
-    def liftF[F[_]](implicit M: ApplicativeError[F, Throwable]): F[B] = {
-      either.fold(M.raiseError, M.pure)
-    }
-  }
-
-  implicit class OptionOps[A](option: Option[A]) {
-    def liftF[F[_]](e: Throwable)(
-        implicit M: ApplicativeError[F, Throwable]): F[A] = {
-      option match {
-        case None        => M.raiseError(e)
-        case Some(value) => M.pure(value)
-      }
-    }
-  }
-
   def program[F[_]](url: String)(
       implicit L: Logger[F],
       H: Http[F],
@@ -65,14 +49,14 @@ object Main extends App {
     val ContentLength = CaseInsensitiveString("content-length")
     for {
       client   <- H.client()
-      uri      <- Uri.fromString(url).liftF[F]
+      uri      <- Uri.fromString(url).leftWiden[Throwable].liftTo[F]
       _        <- L.debug(s"URI: $uri")
       response <- client.fetch(Request[F](Method.HEAD, uri))(M.pure)
       _        <- L.debug("Response recv")
       header <- response.headers
                  .get(ContentLength)
-                 .liftF[F](HttpHeaderMissing("content-length"))
-      length <- Try { header.value.toInt }.toEither.liftF[F]
+                 .liftTo[F](HttpHeaderMissing("content-length"): Throwable)
+      length <- Try { header.value.toInt }.toEither.liftTo[F]
       _      <- L.info(length)
     } yield ()
   }
