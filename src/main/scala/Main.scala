@@ -1,34 +1,25 @@
 import cats._
+import cats.data.OptionT
 import cats.effect._
 import cats.implicits._
 import org.http4s.client.Client
 import org.http4s.client.blaze.Http1Client
 import org.http4s.util.CaseInsensitiveString
-import org.http4s.{Method, Request, Uri}
+import org.http4s.{Method, Request, Response, Uri}
 
 import scala.util.Try
+import mtd.adt._
+import mtd.error._
 
 object Main extends App {
   val ContentLengthHeader = CaseInsensitiveString("content-length")
 
-  trait Http[F[_]] {
-    def client(): F[Client[F]]
-  }
-
-  trait Logger[F[_]] {
-    def debug(msg: Any): F[Unit]
-    def trace(msg: Any): F[Unit]
-    def info(msg: Any): F[Unit]
-    def warn(msg: Any): F[Unit]
-    def error(msg: Any): F[Unit]
-  }
-
   implicit val http = new Http[IO] {
     override def client(): IO[Client[IO]] = Http1Client[IO]()
   }
-  implicit val logger = new Logger[IO] {
-    private val logger = org.log4s.getLogger
 
+  implicit val logger = new Logger[IO] {
+    private val logger            = org.log4s.getLogger
     def debug(msg: Any): IO[Unit] = IO { logger.debug(msg.toString) }
     def trace(msg: Any): IO[Unit] = IO { logger.trace(msg.toString) }
     def info(msg: Any): IO[Unit]  = IO { logger.info(msg.toString) }
@@ -36,32 +27,52 @@ object Main extends App {
     def error(msg: Any): IO[Unit] = IO { logger.error(msg.toString) }
   }
 
-  trait MTDError extends Throwable
-  case class HttpHeaderMissing(headerName: String) extends MTDError {
-    override def toString: String = s"Missing HTTP header: $headerName"
+  implicit val console = new Console[IO] {
+    override def getArgs(): IO[Array[String]] = IO.pure(args)
   }
 
-  def program[F[_]](url: String)(
-      implicit L: Logger[F],
-      H: Http[F],
-      M: MonadError[F, Throwable]
-  ): F[Unit] = {
+  def getContentLength[F[_]: Monad](response: Response[F]): OptionT[F, Int] = {
     val ContentLength = CaseInsensitiveString("content-length")
     for {
+      header <- response.headers.get(ContentLength).toOptionT[F]
+      length <- Try { header.value.toInt }.toOption.toOptionT[F]
+    } yield length
+  }
+
+  def mkHeadRequest[F[_]](uri: Uri)(implicit H: Http[F],
+                                    M: Monad[F]): F[Response[F]] = {
+    for {
       client   <- H.client()
-      uri      <- Uri.fromString(url).leftWiden[Throwable].liftTo[F]
-      _        <- L.debug(s"URI: $uri")
       response <- client.fetch(Request[F](Method.HEAD, uri))(M.pure)
-      _        <- L.debug("Response recv")
-      header <- response.headers
-                 .get(ContentLength)
-                 .liftTo[F](HttpHeaderMissing("content-length"): Throwable)
-      length <- Try { header.value.toInt }.toEither.liftTo[F]
-      _      <- L.info(length)
+    } yield response
+  }
+
+  def getURLArgs[F[_]: Monad](implicit C: Console[F]): OptionT[F, Uri] = {
+    for {
+      args     <- OptionT.liftF(C.getArgs())
+      firstArg <- { if (args.length > 0) Some(args(0)) else None }.toOptionT[F]
+      uri      <- Uri.fromString(firstArg).toOption.toOptionT[F]
+    } yield uri
+  }
+
+  def program[F[_]](
+      implicit L: Logger[F],
+      H: Http[F],
+      C: Console[F],
+      M: MonadError[F, Throwable]
+  ): F[Unit] = {
+    for {
+      _        <- L.info(s"ARGS: ${args.mkString(",")}")
+      uri      <- getURLArgs[F].value.flatMap(_.liftTo[F](InvalidURL: Throwable))
+      _        <- L.info(s"URI: $uri")
+      response <- mkHeadRequest[F](uri)
+      length <- getContentLength(response).value.flatMap(
+                 _.liftTo[F](ContentLengthCouldNotBeDetected: Throwable))
+      _ <- L.info(s"LENGTH: $length")
     } yield ()
   }
 
-  program[IO]("https://example.com").attempt
+  program[IO].attempt
     .flatMap {
       case Left(err) => logger.error(err)
       case Right(_)  => IO.unit

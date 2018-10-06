@@ -4,8 +4,6 @@
       <pattern>MTD-%-8level%msg%n</pattern>
     </encoder>
   </appender>
-
-
   <root level="INFO">
     <appender-ref ref="STDOUT"/>
   </root>
